@@ -54,14 +54,14 @@ TRANSLATION_ENABLED = True
 # TTS SETTINGS
 # ============================================================================
 
-# Path to Piper voice models (for en/ru)
+# Piper TTS for English (high quality)
 PIPER_MODELS_DIR = Path(__file__).parent / "models" / "piper"
+PIPER_VOICE_EN = "en_US-amy-medium"
 
-# Piper voices for en/ru
-PIPER_VOICES = {
-    "en": "en_US-amy-medium",
-    "ru": "ru_RU-irina-medium",
-}
+# Silero TTS V5 for Russian (high quality, proper stress/intonation)
+SILERO_MODEL_ID = "v4_ru"  # v4_ru is stable, supports SSML
+SILERO_SPEAKER = "xenia"   # Options: aidar, baya, kseniya, xenia, eugene, random
+SILERO_SAMPLE_RATE = 48000
 
 # Hebrew uses Facebook MMS-TTS (transformer model)
 MMS_HEBREW_MODEL = "facebook/mms-tts-heb"
@@ -183,8 +183,11 @@ class TextReaderService:
         logger.info(f"Stop hotkey configured: {STOP_HOTKEY}")
 
         # Load TTS models
-        self.piper_voices = {}
-        self._load_piper_voices()
+        self.piper_voice_en = None
+        self._load_piper_english()
+
+        self.silero_model = None
+        self._load_silero_russian()
 
         self.mms_model = None
         self.mms_tokenizer = None
@@ -197,8 +200,8 @@ class TextReaderService:
         logger.info("TextReaderService initialized (fully local)")
         logger.info(f"Translation: {'Enabled (MarianMT)' if TRANSLATION_ENABLED else 'Disabled'}")
 
-    def _load_piper_voices(self):
-        """Load Piper voice models for en/ru."""
+    def _load_piper_english(self):
+        """Load Piper voice model for English."""
         if not PIPER_AVAILABLE:
             logger.warning("Piper TTS not available")
             return
@@ -207,17 +210,40 @@ class TextReaderService:
             logger.warning(f"Piper models directory not found: {PIPER_MODELS_DIR}")
             return
 
-        for lang, voice_name in PIPER_VOICES.items():
-            model_path = PIPER_MODELS_DIR / f"{voice_name}.onnx"
-            config_path = PIPER_MODELS_DIR / f"{voice_name}.onnx.json"
+        model_path = PIPER_MODELS_DIR / f"{PIPER_VOICE_EN}.onnx"
+        config_path = PIPER_MODELS_DIR / f"{PIPER_VOICE_EN}.onnx.json"
 
-            if model_path.exists() and config_path.exists():
-                try:
-                    voice = PiperVoice.load(str(model_path), str(config_path))
-                    self.piper_voices[lang] = voice
-                    logger.info(f"Loaded Piper voice for {lang}: {voice_name}")
-                except Exception as e:
-                    logger.error(f"Failed to load Piper voice {voice_name}: {e}")
+        if model_path.exists() and config_path.exists():
+            try:
+                self.piper_voice_en = PiperVoice.load(str(model_path), str(config_path))
+                logger.info(f"Loaded Piper voice for English: {PIPER_VOICE_EN}")
+            except Exception as e:
+                logger.error(f"Failed to load Piper English voice: {e}")
+
+    def _load_silero_russian(self):
+        """Load Silero TTS V4 for Russian (high quality with proper stress)."""
+        try:
+            logger.info(f"Loading Silero Russian model: {SILERO_MODEL_ID}, speaker: {SILERO_SPEAKER}...")
+
+            # Determine device
+            self.silero_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            model, _ = torch.hub.load(
+                repo_or_dir='snakers4/silero-models',
+                model='silero_tts',
+                language='ru',
+                speaker=SILERO_MODEL_ID
+            )
+            model.to(self.silero_device)
+            self.silero_model = model
+
+            logger.info(f"Silero Russian model loaded on {self.silero_device}")
+            logger.info(f"Silero model type: {type(self.silero_model)}")
+        except Exception as e:
+            logger.error(f"Failed to load Silero Russian model: {e}")
+            import traceback
+            traceback.print_exc()
+            self.silero_model = None
 
     def _load_mms_hebrew(self):
         """Load Facebook MMS-TTS model for Hebrew."""
@@ -425,22 +451,21 @@ class TextReaderService:
 
     def speak_text(self, text: str, language: str):
         """Convert text to speech using appropriate TTS model."""
-        if language == "he":
+        if language == "ru":
+            self._speak_silero_russian(text)
+        elif language == "he":
             self._speak_mms_hebrew(text)
-        elif language in self.piper_voices:
-            self._speak_piper(text, language)
+        elif language == "en":
+            self._speak_piper_english(text)
         else:
             # Fallback to English
-            if "en" in self.piper_voices:
-                self._speak_piper(text, "en")
-            else:
-                logger.error(f"No TTS available for {language}")
+            logger.warning(f"No TTS for {language}, falling back to English")
+            self._speak_piper_english(text)
 
-    def _speak_piper(self, text: str, language: str):
-        """Use Piper TTS for en/ru."""
-        voice = self.piper_voices.get(language)
-        if not voice:
-            logger.error(f"No Piper voice for {language}")
+    def _speak_piper_english(self, text: str):
+        """Use Piper TTS for English."""
+        if not self.piper_voice_en:
+            logger.error("Piper English voice not loaded")
             return
 
         try:
@@ -448,12 +473,66 @@ class TextReaderService:
                 temp_path = f.name
 
             with wave.open(temp_path, "wb") as wav_file:
-                voice.synthesize_wav(text, wav_file)
+                self.piper_voice_en.synthesize_wav(text, wav_file)
 
             self._play_audio(temp_path)
 
         except Exception as e:
             logger.error(f"Piper TTS error: {e}")
+        finally:
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+
+    def _speak_silero_russian(self, text: str):
+        """Use Silero TTS V4 for Russian (high quality)."""
+        if self.silero_model is None:
+            logger.error("Silero Russian model not loaded (is None)")
+            return
+
+        try:
+            logger.info(f"Silero input text ({len(text)} chars): {text[:200]}...")
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                temp_path = f.name
+
+            # Split long text into sentences for better processing
+            # Silero works better with shorter chunks
+            import re
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            audio_chunks = []
+
+            for sentence in sentences:
+                if not sentence.strip():
+                    continue
+                logger.debug(f"Processing sentence: {sentence[:50]}...")
+                audio = self.silero_model.apply_tts(
+                    text=sentence,
+                    speaker=SILERO_SPEAKER,
+                    sample_rate=SILERO_SAMPLE_RATE
+                )
+                audio_np = audio.cpu().numpy() if torch.is_tensor(audio) else audio
+                audio_chunks.append(audio_np)
+
+            if not audio_chunks:
+                logger.warning("No audio chunks generated")
+                return
+
+            # Concatenate all audio chunks
+            import numpy as np
+            full_audio = np.concatenate(audio_chunks)
+
+            # Save to WAV file
+            scipy.io.wavfile.write(temp_path, SILERO_SAMPLE_RATE, full_audio)
+            logger.info(f"Generated audio: {len(full_audio)} samples")
+
+            self._play_audio(temp_path)
+
+        except Exception as e:
+            logger.error(f"Silero TTS error: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             try:
                 os.unlink(temp_path)
