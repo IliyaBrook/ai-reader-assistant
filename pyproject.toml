@@ -1,0 +1,15 @@
+[project]
+name = "ai-reader-assistant"
+version = "0.1.0"
+description = "AI Text Reader - reads selected text aloud with translation"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "python-xlib>=0.33",
+    "langdetect>=1.0.9",
+    "piper-tts>=1.2.0",
+    "transformers>=4.40.0",
+    "torch>=2.0.0",
+    "scipy>=1.10.0",
+    "sentencepiece>=0.1.99",
+]

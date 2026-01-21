@@ -1,0 +1,17 @@
+[Unit]
+Description=AI Text Reader Service - Reads selected text aloud with translation
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=%h/.Xauthority"
+
+WorkingDirectory=/mnt/DiskE_Crucial/codding/My_Projects/ai-reader-assistant
+ExecStart=/home/brook/.local/bin/uv run python text_reader_service.py
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
