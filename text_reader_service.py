@@ -21,6 +21,7 @@ import tempfile
 import threading
 import logging
 import time
+import gc
 from pathlib import Path
 
 # ============================================================================
@@ -32,6 +33,11 @@ from pathlib import Path
 # Examples: "XF86Calculator", "ctrl+XF86Calculator", "ctrl+shift+r"
 HOTKEY = "Insert"
 STOP_HOTKEY = "ctrl+Insert"
+
+# Model Unload Timeout (seconds)
+# Models will be unloaded from GPU/memory after this period of inactivity
+# Set to 0 to disable auto-unloading (always keep models in memory)
+MODEL_UNLOAD_TIMEOUT = 60  # 1 minute
 
 # ============================================================================
 # TRANSLATION SETTINGS (Helsinki-NLP MarianMT - Local)
@@ -182,23 +188,112 @@ class TextReaderService:
         logger.info(f"Hotkey configured: {HOTKEY}")
         logger.info(f"Stop hotkey configured: {STOP_HOTKEY}")
 
-        # Load TTS models
+        # Models are loaded lazily on first use
         self.piper_voice_en = None
-        self._load_piper_english()
-
         self.silero_model = None
-        self._load_silero_russian()
-
+        self.silero_device = None
         self.mms_model = None
         self.mms_tokenizer = None
-        self._load_mms_hebrew()
-
-        # Load translation models (MarianMT)
         self.translation_models = {}
-        self._load_translation_models()
 
-        logger.info("TextReaderService initialized (fully local)")
+        # Model management
+        self.models_lock = threading.Lock()
+        self.models_loaded = False
+        self.last_used_time: float = 0
+        self.unload_timer: threading.Timer | None = None
+
+        logger.info(f"TextReaderService initialized (lazy model loading)")
+        logger.info(f"Model unload timeout: {MODEL_UNLOAD_TIMEOUT}s")
         logger.info(f"Translation: {'Enabled (MarianMT)' if TRANSLATION_ENABLED else 'Disabled'}")
+        logger.info("Models will load on first use")
+
+    def _load_all_models(self):
+        """Load all models into memory (called on demand)."""
+        with self.models_lock:
+            if self.models_loaded:
+                # Models already loaded, just update last used time
+                self.last_used_time = time.time()
+                self._schedule_unload()
+                return
+
+            logger.info("Loading all models...")
+
+            # Load TTS models
+            self._load_piper_english()
+            self._load_silero_russian()
+            self._load_mms_hebrew()
+
+            # Load translation models (MarianMT)
+            self._load_translation_models()
+
+            self.models_loaded = True
+            self.last_used_time = time.time()
+            self._schedule_unload()
+            logger.info("All models loaded successfully!")
+
+    def _unload_all_models(self):
+        """Unload all models from memory to free resources."""
+        with self.models_lock:
+            if not self.models_loaded:
+                return  # Already unloaded
+
+            # Check if enough time has passed since last use
+            elapsed = time.time() - self.last_used_time
+            if elapsed < MODEL_UNLOAD_TIMEOUT:
+                # Not enough time passed, reschedule
+                self._schedule_unload()
+                return
+
+            logger.info(f"Unloading models (idle for {int(elapsed)}s)...")
+
+            # Unload Piper English
+            if self.piper_voice_en is not None:
+                del self.piper_voice_en
+                self.piper_voice_en = None
+
+            # Unload Silero Russian
+            if self.silero_model is not None:
+                del self.silero_model
+                self.silero_model = None
+
+            # Unload MMS Hebrew
+            if self.mms_model is not None:
+                del self.mms_model
+                del self.mms_tokenizer
+                self.mms_model = None
+                self.mms_tokenizer = None
+
+            # Unload translation models
+            if self.translation_models:
+                for key in list(self.translation_models.keys()):
+                    del self.translation_models[key]
+                self.translation_models = {}
+
+            self.models_loaded = False
+
+            # Force garbage collection
+            gc.collect()
+
+            # Clear CUDA cache if torch is available
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+            logger.info("Models unloaded, memory freed!")
+
+    def _schedule_unload(self):
+        """Schedule model unloading after timeout."""
+        if MODEL_UNLOAD_TIMEOUT <= 0:
+            return  # Auto-unload disabled
+
+        # Cancel existing timer if any
+        if self.unload_timer is not None:
+            self.unload_timer.cancel()
+
+        # Schedule new unload
+        self.unload_timer = threading.Timer(MODEL_UNLOAD_TIMEOUT, self._unload_all_models)
+        self.unload_timer.daemon = True
+        self.unload_timer.start()
 
     def _load_piper_english(self):
         """Load Piper voice model for English."""
@@ -615,6 +710,9 @@ class TextReaderService:
 
             logger.info(f"Selected text: {text[:100]}{'...' if len(text) > 100 else ''}")
 
+            # Ensure models are loaded
+            self._load_all_models()
+
             _, target_lang = self.get_current_layout()
             logger.info(f"Target language (keyboard layout): {target_lang}")
 
@@ -698,6 +796,32 @@ class TextReaderService:
     def stop(self):
         """Stop the service."""
         self.running = False
+
+        # Cancel unload timer
+        if self.unload_timer is not None:
+            self.unload_timer.cancel()
+            self.unload_timer = None
+
+        # Unload models immediately
+        with self.models_lock:
+            if self.models_loaded:
+                if self.piper_voice_en is not None:
+                    del self.piper_voice_en
+                    self.piper_voice_en = None
+                if self.silero_model is not None:
+                    del self.silero_model
+                    self.silero_model = None
+                if self.mms_model is not None:
+                    del self.mms_model
+                    del self.mms_tokenizer
+                    self.mms_model = None
+                    self.mms_tokenizer = None
+                self.translation_models = {}
+                self.models_loaded = False
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
         logger.info("Service stopped")
 
 
