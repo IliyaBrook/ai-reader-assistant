@@ -107,6 +107,7 @@ class TextReaderWorker:
     def _load_piper_english(self):
         """Load Piper voice model for English."""
         try:
+            # noinspection PyUnresolvedReferences
             from piper import PiperVoice
             
             model_path = PIPER_MODELS_DIR / f"{PIPER_VOICE_EN}.onnx"
@@ -144,6 +145,7 @@ class TextReaderWorker:
         """Load Facebook MMS-TTS for Hebrew."""
         try:
             import torch
+            # noinspection PyUnresolvedReferences
             from transformers import VitsModel, AutoTokenizer
             
             self.mms_model = VitsModel.from_pretrained(MMS_HEBREW_MODEL)
@@ -163,6 +165,7 @@ class TextReaderWorker:
             return
         
         try:
+            # noinspection PyUnresolvedReferences
             from transformers import MarianMTModel, MarianTokenizer
             
             logger.info("   Loading translation models...")
@@ -189,14 +192,38 @@ class TextReaderWorker:
             return text
         
         import torch
+        import re
         
         # Direct translation
         if (source_lang, target_lang) in self.translation_models:
             model, tokenizer = self.translation_models[(source_lang, target_lang)]
-            inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True)
-            with torch.no_grad():
-                translated = model.generate(**inputs)
-            return tokenizer.decode(translated[0], skip_special_tokens=True)
+            
+            # Split text into sentences to avoid truncation issues
+            # This regex splits on sentence-ending punctuation while keeping the punctuation
+            sentence_pattern = r'(?<=[.!?])\s+'
+            sentences = re.split(sentence_pattern, text)
+            
+            # If only one "sentence" (no splits), just translate it directly
+            if len(sentences) == 1:
+                sentences = [text]
+            
+            translated_parts = []
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                
+                try:
+                    inputs = tokenizer(sentence, return_tensors="pt", padding=True, truncation=True, max_length=512)
+                    with torch.no_grad():
+                        translated = model.generate(**inputs, max_length=512)
+                    translated_text = tokenizer.decode(translated[0], skip_special_tokens=True)
+                    translated_parts.append(translated_text)
+                except Exception as e:
+                    logger.warning(f"Translation error for chunk: {e}")
+                    translated_parts.append(sentence)  # Keep original if translation fails
+            
+            return " ".join(translated_parts)
         
         # Via English for ru<->he
         if source_lang == "ru" and target_lang == "he":
