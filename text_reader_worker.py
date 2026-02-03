@@ -399,9 +399,21 @@ class TextReaderWorker:
     def _handle_client(self, conn):
         """Handle a client connection."""
         try:
-            data = conn.recv(4096).decode()
+            # Read all data until newline (no size limit)
+            chunks = []
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if b'\n' in chunk:
+                    break
+            
+            data = b''.join(chunks).decode()
             if not data:
                 return
+            
+            logger.debug(f"Received {len(data)} bytes from client")
             
             request = json.loads(data.strip())
             result = self._handle_request(request)

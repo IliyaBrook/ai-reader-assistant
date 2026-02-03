@@ -56,7 +56,7 @@ SOCKET_PATH = "/tmp/text_reader_worker.sock"
 PID_FILE = "/tmp/text_reader_service.pid"
 
 # Logging
-LOG_LEVEL = logging.INFO
+LOG_LEVEL = logging.DEBUG
 
 # ============================================================================
 # IMPORTS
@@ -336,6 +336,8 @@ class TextReaderListener:
     
     def process_selection(self):
         """Main processing: get selected text and send to worker."""
+        logger.debug(">>> process_selection() called")
+        
         # Stop any current playback first
         self.stop_playback()
         
@@ -346,7 +348,11 @@ class TextReaderListener:
             self.is_processing = True
         
         try:
+            logger.debug(">>> Getting selected text...")
             text = self._get_selected_text()
+            
+            logger.info(f">>> Got text: {len(text)} chars, {len(text.split())} words")
+            
             if not text:
                 logger.info("No text selected")
                 return
@@ -359,6 +365,7 @@ class TextReaderListener:
             text_script = self._detect_text_script(text)
             logger.info(f"Detected text script: {text_script}")
             
+            logger.debug(">>> Sending to worker...")
             # Send to worker for translation and TTS
             self._send_to_worker(
                 command="speak",
@@ -366,9 +373,12 @@ class TextReaderListener:
                 source_lang=text_script,
                 target_lang=target_lang
             )
+            logger.debug(">>> Sent to worker")
             
         except Exception as e:
             logger.error(f"Processing error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
         finally:
             with self.processing_lock:
                 self.is_processing = False
