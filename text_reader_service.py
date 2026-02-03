@@ -160,23 +160,61 @@ class TextReaderListener:
         return keycode
     
     def _get_selected_text(self) -> str:
-        """Get currently selected text using xclip."""
+        """Get currently selected text using Xlib directly."""
+        from Xlib import X
+        
         try:
-            result = subprocess.run(
-                ["xclip", "-selection", "primary", "-o"],
-                capture_output=True,
-                text=True,
-                timeout=2
+            # Create a temporary window to receive selection
+            screen = self.display.screen()
+            window = screen.root.create_window(
+                0, 0, 1, 1, 0, screen.root_depth,
+                event_mask=X.PropertyChangeMask
             )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except subprocess.TimeoutExpired:
-            logger.warning("xclip timeout")
-        except FileNotFoundError:
-            logger.error("xclip not found")
+            
+            # Atoms
+            PRIMARY = self.display.intern_atom("PRIMARY")
+            UTF8_STRING = self.display.intern_atom("UTF8_STRING")
+            XSEL_DATA = self.display.intern_atom("XSEL_DATA")
+            
+            try:
+                # Request selection conversion
+                window.convert_selection(PRIMARY, UTF8_STRING, XSEL_DATA, X.CurrentTime)
+                self.display.flush()
+                
+                # Wait for SelectionNotify event with timeout
+                start_time = time.time()
+                timeout = 5.0
+                
+                while time.time() - start_time < timeout:
+                    if self.display.pending_events():
+                        event = self.display.next_event()
+                        if event.type == X.SelectionNotify:
+                            if event.property == X.NONE:
+                                logger.warning("No selection available")
+                                return ""
+                            
+                            # Read the selection data
+                            result = window.get_full_property(XSEL_DATA, UTF8_STRING)
+                            if result:
+                                data = result.value
+                                if isinstance(data, bytes):
+                                    text = data.decode('utf-8', errors='replace').strip()
+                                else:
+                                    text = str(data).strip()
+                                logger.debug(f"Got selection: {len(text)} chars")
+                                return text
+                            return ""
+                    else:
+                        time.sleep(0.01)
+                
+                logger.warning("Selection timeout")
+                return ""
+            finally:
+                window.destroy()
+                
         except Exception as e:
             logger.error(f"Error getting selected text: {e}")
-        return ""
+            return ""
     
     def _get_current_layout(self) -> str:
         """Get current keyboard layout language code."""
